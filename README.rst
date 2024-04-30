@@ -1,8 +1,4 @@
-.. image:: https://travis-ci.org/globocom/m3u8.svg
-    :target: https://travis-ci.org/globocom/m3u8
-
-.. image:: https://coveralls.io/repos/globocom/m3u8/badge.png?branch=master
-    :target: https://coveralls.io/r/globocom/m3u8?branch=master
+.. image:: https://github.com/globocom/m3u8/actions/workflows/main.yml/badge.svg
 
 .. image:: https://badge.fury.io/py/m3u8.svg
     :target: https://badge.fury.io/py/m3u8
@@ -61,12 +57,16 @@ Supported tags
 * `#EXT-X-KEY`_
 * `#EXT-X-STREAM-INF`_
 * `#EXT-X-VERSION`_
-* #EXT-X-ALLOW-CACHE
+* `#EXT-X-ALLOW-CACHE`_
 * `#EXT-X-ENDLIST`_
 * `#EXTINF`_
 * `#EXT-X-I-FRAMES-ONLY`_
+* `#EXT-X-BITRATE`_
 * `#EXT-X-BYTERANGE`_
 * `#EXT-X-I-FRAME-STREAM-INF`_
+* `#EXT-X-IMAGES-ONLY`_
+* `#EXT-X-IMAGE-STREAM-INF`_
+* `#EXT-X-TILES`_
 * `#EXT-X-DISCONTINUITY`_
 * #EXT-X-CUE-OUT
 * #EXT-X-CUE-OUT-CONT
@@ -76,19 +76,22 @@ Supported tags
 * `#EXT-X-INDEPENDENT-SEGMENTS`_
 * `#EXT-X-MAP`_
 * `#EXT-X-START`_
-* #EXT-X-SERVER-CONTROL
-* #EXT-X-PART-INF
-* #EXT-X-PART
-* #EXT-X-RENDITION-REPORT
-* #EXT-X-SKIP
+* `#EXT-X-SERVER-CONTROL`_
+* `#EXT-X-PART-INF`_
+* `#EXT-X-PART`_
+* `#EXT-X-RENDITION-REPORT`_
+* `#EXT-X-SKIP`_
 * `#EXT-X-SESSION-DATA`_
+* `#EXT-X-PRELOAD-HINT`_
+* `#EXT-X-SESSION-KEY`_
 * `#EXT-X-DATERANGE`_
 * `#EXT-X-GAP`_
+* `#EXT-X-CONTENT-STEERING`_
 
 Encryption keys
 ---------------
 
-The segments may be or not encrypted. The ``keys`` attribute list will
+The segments may or may not be encrypted. The ``keys`` attribute list will
 be a list  with all the different keys as described with `#EXT-X-KEY`_:
 
 Each key has the next properties:
@@ -109,7 +112,7 @@ To traverse the list of keys available:
     import m3u8
 
     m3u8_obj = m3u8.loads('#EXTM3U8 ... etc ...')
-    len(m3u8_obj.keys) => returns the number of keys available in the list (normally 1)
+    len(m3u8_obj.keys)  # => returns the number of keys available in the list (normally 1)
     for key in m3u8_obj.keys:
        if key:  # First one could be None
           key.uri
@@ -217,20 +220,83 @@ Quoting the documentation::
     Tags begin with #EXT.  They are case-sensitive.  All other lines that
     begin with '#' are comments and SHOULD be ignored.
 
-This library ignores all the non standard tags by default. If you want them to be collected while loading the file content,
+This library ignores all the non-standard tags by default. If you want them to be collected while loading the file content,
 you need to pass a function to the `load/loads` functions, following the example below:
 
 .. code-block:: python
 
     import m3u8
 
-    def get_movie(line, data, lineno):
+    def get_movie(line, lineno, data, state):
         if line.startswith('#MOVIE-NAME:'):
             custom_tag = line.split(':')
             data['movie'] = custom_tag[1].strip()
 
     m3u8_obj = m3u8.load('http://videoserver.com/playlist.m3u8', custom_tags_parser=get_movie)
     print(m3u8_obj.data['movie'])  #  million dollar baby
+
+
+Also you are able to override parsing of existing standard tags.
+To achieve this your custom_tags_parser function have to return boolean True - it will mean that you fully implement parsing of current line therefore 'main parser' can go to next line.
+
+.. code-block:: python
+
+    import re
+    import m3u8
+    from m3u8 import protocol
+    from m3u8.parser import save_segment_custom_value
+
+
+    def parse_iptv_attributes(line, lineno, data, state):
+        # Customize parsing #EXTINF
+        if line.startswith(protocol.extinf):
+            title = ''
+            chunks = line.replace(protocol.extinf + ':', '').split(',', 1)
+            if len(chunks) == 2:
+                duration_and_props, title = chunks
+            elif len(chunks) == 1:
+                duration_and_props = chunks[0]
+
+            additional_props = {}
+            chunks = duration_and_props.strip().split(' ', 1)
+            if len(chunks) == 2:
+                duration, raw_props = chunks
+                matched_props = re.finditer(r'([\w\-]+)="([^"]*)"', raw_props)
+                for match in matched_props:
+                    additional_props[match.group(1)] = match.group(2)
+            else:
+                duration = duration_and_props
+
+            if 'segment' not in state:
+                state['segment'] = {}
+            state['segment']['duration'] = float(duration)
+            state['segment']['title'] = title
+
+            # Helper function for saving custom values
+            save_segment_custom_value(state, 'extinf_props', additional_props)
+
+            # Tell 'main parser' that we expect an URL on next lines
+            state['expect_segment'] = True
+
+            # Tell 'main parser' that it can go to next line, we've parsed current fully.
+            return True
+
+
+    if __name__ == '__main__':
+        PLAYLIST = """#EXTM3U
+        #EXTINF:-1 timeshift="0" catchup-days="7" catchup-type="flussonic" tvg-id="channel1" group-title="Group1",Channel1
+        http://str00.iptv.domain/7331/mpegts?token=longtokenhere
+        """
+
+        parsed = m3u8.loads(PLAYLIST, custom_tags_parser=parse_iptv_attributes)
+
+        first_segment_props = parsed.segments[0].custom_parser_values['extinf_props']
+        print(first_segment_props['tvg-id'])  # 'channel1'
+        print(first_segment_props['group-title'])  # 'Group1'
+        print(first_segment_props['catchup-type'])  # 'flussonic'
+
+Helper functions get_segment_custom_value() and save_segment_custom_value() are intended for getting/storing your parsed values per segment into Segment class.
+After that all custom values will be accessible via property custom_parser_values of Segment instance.
 
 Using different HTTP clients
 ----------------------------
@@ -284,7 +350,7 @@ Running Tests
 Contributing
 ============
 
-All contribution is welcome, but we will merge a pull request if, and only if, it
+All contributions are welcome, but we will merge a pull request if, and only if, it
 
 -  has tests
 -  follows the code conventions
@@ -296,6 +362,8 @@ the same thing.
 .. _m3u8: https://tools.ietf.org/html/rfc8216
 .. _#EXT-X-VERSION: https://tools.ietf.org/html/rfc8216#section-4.3.1.2
 .. _#EXTINF: https://tools.ietf.org/html/rfc8216#section-4.3.2.1
+.. _#EXT-X-ALLOW-CACHE: https://datatracker.ietf.org/doc/html/draft-pantos-http-live-streaming-07#section-3.3.6
+.. _#EXT-X-BITRATE: https://datatracker.ietf.org/doc/html/draft-pantos-hls-rfc8216bis#section-4.4.4.8
 .. _#EXT-X-BYTERANGE: https://tools.ietf.org/html/rfc8216#section-4.3.2.2
 .. _#EXT-X-DISCONTINUITY: https://tools.ietf.org/html/rfc8216#section-4.3.2.3
 .. _#EXT-X-KEY: https://tools.ietf.org/html/rfc8216#section-4.3.2.4
@@ -311,11 +379,22 @@ the same thing.
 .. _#EXT-X-MEDIA: https://tools.ietf.org/html/rfc8216#section-4.3.4.1
 .. _#EXT-X-STREAM-INF: https://tools.ietf.org/html/rfc8216#section-4.3.4.2
 .. _#EXT-X-I-FRAME-STREAM-INF: https://tools.ietf.org/html/rfc8216#section-4.3.4.3
+.. _#EXT-X-IMAGES-ONLY: https://github.com/image-media-playlist/spec/blob/master/image_media_playlist_v0_4.pdf
+.. _#EXT-X-IMAGE-STREAM-INF: https://github.com/image-media-playlist/spec/blob/master/image_media_playlist_v0_4.pdf
+.. _#EXT-X-TILES: https://github.com/image-media-playlist/spec/blob/master/image_media_playlist_v0_4.pdf
 .. _#EXT-X-SESSION-DATA: https://tools.ietf.org/html/rfc8216#section-4.3.4.4
+.. _#EXT-X-SESSION-KEY: https://tools.ietf.org/html/rfc8216#section-4.3.4.5
 .. _#EXT-X-INDEPENDENT-SEGMENTS: https://tools.ietf.org/html/rfc8216#section-4.3.5.1
 .. _#EXT-X-START: https://tools.ietf.org/html/rfc8216#section-4.3.5.2
+.. _#EXT-X-PRELOAD-HINT: https://datatracker.ietf.org/doc/html/draft-pantos-hls-rfc8216bis-09#section-4.4.5.3
 .. _#EXT-X-DATERANGE: https://tools.ietf.org/html/rfc8216#section-4.3.2.7
 .. _#EXT-X-GAP: https://tools.ietf.org/html/draft-pantos-hls-rfc8216bis-05#section-4.4.2.7
+.. _#EXT-X-CONTENT-STEERING: https://tools.ietf.org/html/draft-pantos-hls-rfc8216bis-10#section-4.4.6.64
+.. _#EXT-X-SKIP: https://datatracker.ietf.org/doc/html/draft-pantos-hls-rfc8216bis#section-4.4.5.2
+.. _#EXT-X-RENDITION-REPORT: https://datatracker.ietf.org/doc/html/draft-pantos-hls-rfc8216bis#section-4.4.5.4
+.. _#EXT-X-PART: https://datatracker.ietf.org/doc/html/draft-pantos-hls-rfc8216bis#section-4.4.4.9
+.. _#EXT-X-PART-INF: https://datatracker.ietf.org/doc/html/draft-pantos-hls-rfc8216bis#section-4.4.3.7
+.. _#EXT-X-SERVER-CONTROL: https://datatracker.ietf.org/doc/html/draft-pantos-hls-rfc8216bis#section-4.4.3.8
 .. _issue 1: https://github.com/globocom/m3u8/issues/1
 .. _variant streams: https://tools.ietf.org/html/rfc8216#section-6.2.4
 .. _example here: http://tools.ietf.org/html/draft-pantos-http-live-streaming-08#section-8.5
