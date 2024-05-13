@@ -14,7 +14,7 @@ except ImportError:
     pass
 
 
-from m3u8 import protocol
+from m3u8 import protocol, version_matching
 
 """
 http://tools.ietf.org/html/draft-pantos-http-live-streaming-08#section-3.2
@@ -74,8 +74,15 @@ def parse(content, strict=False, custom_tags_parser=None):
         "current_segment_map": None,
     }
 
+    lines = string_to_lines(content)
+    if strict:
+        found_errors = version_matching.validate(lines)
+
+        if len(found_errors) > 0:
+            raise Exception(found_errors)
+
     lineno = 0
-    for line in string_to_lines(content):
+    for line in lines:
         lineno += 1
         line = line.strip()
 
